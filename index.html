@@ -135,7 +135,7 @@
             position: absolute;
             width: 220px;
             min-height: 100px;
-            background: url(images/biankuang.webp);
+            background: url(biankuang.webp);
             background-size: 100% 100%;
             box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.08);
             display: flex;
@@ -548,7 +548,6 @@
             onViewportChange();
         })();
 
-        /* ================= 回声亭：跑马灯 + 延迟重现 + 撤销清空 ================= */
         (function () {
             "use strict";
 
@@ -708,7 +707,7 @@
                 return el;
             }
 
-            /* ---------- 从屏幕移除卡片（不删 storage） ---------- */
+
             function removeCommentFromScreen(id) {
                 const rec = liveCards.get(id);
                 if (!rec) return;
