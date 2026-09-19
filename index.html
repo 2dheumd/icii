@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>回声亭 · 跑马灯 | Echo Pavilion</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -548,10 +549,15 @@
             onViewportChange();
         })();
 
+        /* ================= Supabase 配置 ================= */
+        const SUPABASE_URL = 'https://vnsxhzypicvisbzkbkja.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_eGEASRai2ygpPMJkxVIL6w_yP0JlDMW';
+        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        /* ================= 回声亭：跑马灯 + 延迟重现 + 撤销清空 ================= */
         (function () {
             "use strict";
 
-            const STORAGE_KEY = 'icii_echo_comments';
             const REAPPEAR_DELAY = 6000;   // 点 ✕ 后过 6 秒重新出现
 
             const layer     = document.getElementById('cardLayer');
@@ -573,21 +579,29 @@
             const pendingReappear = new Set();
             let undoSnapshot = null;
 
-            function loadComments() {
-                try {
-                    const raw = localStorage.getItem(STORAGE_KEY);
-                    return raw ? JSON.parse(raw) : [];
-                } catch (e) {
-                    console.warn('读取评论失败', e);
-                    return [];
-                }
+            /* ---------- 数据库操作 ---------- */
+            async function loadComments() {
+                const { data, error } = await supabaseClient
+                    .from('echoes')
+                    .select('*')
+                    .order('time', { ascending: true });
+                if (error) { console.warn('读取失败', error); return []; }
+                return data || [];
             }
-            function saveComments(list) {
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-                } catch (e) {
-                    console.warn('保存评论失败', e);
-                }
+
+            async function saveAllComments(list) {
+                // 全量替换：先删所有，再插入
+                await supabaseClient.from('echoes').delete().neq('id', 0);
+                if (list.length === 0) return;
+                const rows = list.map(i => ({ name: i.name, text: i.text, time: i.time }));
+                await supabaseClient.from('echoes').insert(rows);
+            }
+
+            async function updateCounter() {
+                const { count, error } = await supabaseClient
+                    .from('echoes')
+                    .select('*', { count: 'exact', head: true });
+                if (!error) countEl.textContent = count || 0;
             }
 
             function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
@@ -640,7 +654,6 @@
 
             /* ---------- 创建卡片 ---------- */
             function createCardElement(item) {
-                // 防止同一 id 重复创建
                 if (liveCards.has(item.id)) return;
 
                 const el = document.createElement('div');
@@ -666,13 +679,11 @@
                 el.appendChild(textEl);
                 el.appendChild(hint);
 
-                // 点击 ✕：只从屏幕移除，storage 保留，过一会儿重新出现
                 el.addEventListener('click', function (e) {
                     e.stopPropagation();
                     removeCommentFromScreen(item.id);
                 });
 
-                // 悬停暂停
                 el.addEventListener('mouseenter', () => {
                     const rec = liveCards.get(item.id);
                     if (rec && rec.tween) rec.tween.pause();
@@ -682,7 +693,6 @@
                     if (rec && rec.tween) rec.tween.resume();
                 });
 
-                // 触摸暂停 / 恢复
                 el.addEventListener('touchstart', () => {
                     const rec = liveCards.get(item.id);
                     if (rec && rec.tween) rec.tween.pause();
@@ -707,18 +717,16 @@
                 return el;
             }
 
-
+            /* ---------- 从屏幕移除卡片（不删数据库） ---------- */
             function removeCommentFromScreen(id) {
                 const rec = liveCards.get(id);
                 if (!rec) return;
 
-                // 停止动画
                 if (rec.tween) {
                     rec.tween.kill();
                     rec.tween = null;
                 }
 
-                // 关闭动画后移除 DOM
                 if (rec.el && rec.el.parentNode) {
                     rec.el.style.pointerEvents = 'none';
                     rec.el.classList.add('card-closing');
@@ -726,30 +734,26 @@
                     setTimeout(() => rec.el.remove(), 300);
                 }
 
-                // 从 Map 移除，允许之后重新创建
                 liveCards.delete(id);
 
-                // 设置定时器：过一段时间后重新从 storage 里读出来并显示
                 if (pendingReappear.has(id)) return;
                 pendingReappear.add(id);
 
-                setTimeout(() => {
+                setTimeout(async () => {
                     pendingReappear.delete(id);
-
-                    // 如果屏幕已存在同 id 卡（比如 clear 后又 undo 恢复了），就不再重复
                     if (liveCards.has(id)) return;
 
-                    const list = loadComments();
+                    const list = await loadComments();
                     const item = list.find(i => i.id === id);
-                    if (!item) return;    // 已被 clear 清空，就不重现
+                    if (!item) return;
 
                     createCardElement(item);
                 }, REAPPEAR_DELAY);
             }
 
             /* ---------- 清空全部（带撤销快照） ---------- */
-            function clearAll() {
-                const currentList = loadComments();
+            async function clearAll() {
+                const currentList = await loadComments();
                 if (currentList.length === 0) return;
 
                 if (undoSnapshot) cancelUndo();
@@ -766,7 +770,6 @@
                 undoToast.classList.add('show');
                 undoBtn2.disabled = false;
 
-                undoSnapshot.remaining = UNDO_DURATION;
                 undoSnapshot.interval = setInterval(() => {
                     undoSnapshot.remaining--;
                     undoTimer.textContent = undoSnapshot.remaining;
@@ -779,7 +782,7 @@
                     cancelUndo();
                 }, UNDO_DURATION * 1000);
 
-                // 清空屏幕上所有卡片（含动画）
+                // 清空屏幕上所有卡片
                 Array.from(liveCards.keys()).forEach(id => {
                     const rec = liveCards.get(id);
                     if (!rec) return;
@@ -793,25 +796,27 @@
                     liveCards.delete(id);
                 });
 
-                // 清空 localStorage
-                saveComments([]);
-                updateCounter(0);
+                // 清空数据库
+                const { error } = await supabaseClient.from('echoes').delete().neq('id', 0);
+                if (error) console.warn('清空失败', error);
+
+                updateCounter();
             }
 
             /* ---------- 撤销清空 ---------- */
-            function performUndo() {
+            async function performUndo() {
                 if (!undoSnapshot || !undoSnapshot.list.length) return;
 
                 const restoreList = undoSnapshot.list;
                 cancelUndo();
 
-                saveComments(restoreList);
+                await saveAllComments(restoreList);
 
                 restoreList.forEach((item, i) => {
                     setTimeout(() => createCardElement(item), i * 80);
                 });
 
-                updateCounter(restoreList.length);
+                updateCounter();
             }
 
             function cancelUndo() {
@@ -824,25 +829,27 @@
                 undoBtn2.disabled = true;
             }
 
-            function updateCounter(n) {
-                if (typeof n !== 'number') n = liveCards.size;
-                countEl.textContent = n;
-            }
-
             /* ---------- 新增评论 ---------- */
-            function addComment(name, text) {
-                const list = loadComments();
+            async function addComment(name, text) {
                 const item = {
-                    id: Date.now() + '_' + Math.random().toString(36).slice(2, 8),
                     name: name,
                     text: text,
                     time: Date.now()
                 };
-                list.push(item);
-                saveComments(list);
+                const { data, error } = await supabaseClient
+                    .from('echoes')
+                    .insert([item])
+                    .select()
+                    .single();
 
-                createCardElement(item);
-                updateCounter(list.length);
+                if (error) {
+                    console.warn('插入失败', error);
+                    alert('留言发送失败，请检查网络');
+                    return;
+                }
+
+                createCardElement(data);
+                updateCounter();
             }
 
             function submit() {
@@ -867,17 +874,38 @@
             undoBtn2.addEventListener('click', performUndo);
 
             /* ---------- 初始化 ---------- */
-            function init() {
-                const list = loadComments();
+            async function init() {
+                const list = await loadComments();
 
                 list.forEach((item, i) => {
                     setTimeout(() => createCardElement(item), i * 300);
                 });
 
-                updateCounter(list.length);
+                updateCounter();
                 if (window.innerWidth > 760) {
                     commentInput.focus();
                 }
+
+                // ===== 实时同步：其他设备新留言会自动出现 =====
+                supabaseClient
+                    .channel('echoes-realtime')
+                    .on('postgres_changes',
+                        { event: 'INSERT', schema: 'public', table: 'echoes' },
+                        payload => {
+                            const item = payload.new;
+                            if (!liveCards.has(item.id)) {
+                                createCardElement(item);
+                                updateCounter();
+                            }
+                        }
+                    )
+                    .on('postgres_changes',
+                        { event: 'DELETE', schema: 'public', table: 'echoes' },
+                        () => {
+                            updateCounter();
+                        }
+                    )
+                    .subscribe();
             }
 
             if (document.readyState === 'complete') init();
